@@ -1,0 +1,83 @@
+name: Incredibuild training E2E
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Native control, hosted runner, or provisioned Linux IB initiator
+        type: choice
+        options: [native, hosted, cache-only, distributed]
+        default: native
+permissions:
+  contents: read
+jobs:
+  util:
+    runs-on: ${{ (inputs.mode == 'native' && 'ubuntu-latest') || (inputs.mode == 'hosted' && 'incredibuild-runner') || fromJSON('["self-hosted","linux","ib-initiator"]') }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      MODE: ${{ inputs.mode }}
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/ib-training
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare toolchain and dependencies
+        run: |
+          set -euo pipefail
+          rustup show
+          cargo fetch --locked
+          mkdir -p evidence
+          rustc -Vv > evidence/toolchain.txt
+          git rev-parse HEAD > evidence/revision.txt
+      - name: Select and validate Linux profile
+        if: inputs.mode == 'cache-only' || inputs.mode == 'distributed'
+        run: |
+          set -euo pipefail
+          command -v ib_console
+          command -v xmllint
+          kind=local_only
+          if [[ "$MODE" == distributed ]]; then kind=allow_remote; fi
+          cat > ib_profile.xml <<XML
+          <ib_profile version="1">
+            <globals ignore_following_profiles="false" dummy_mode="false" monitor_enable="false" local_slot_priority="low" requested_cores="32"/>
+            <processes>
+              <process filename="rustc" type="$kind"><ib_cache enabled="true"/></process>
+            </processes>
+          </ib_profile>
+          XML
+          xmllint --noout --schema /opt/incredibuild/data/ib_profile.xsd ib_profile.xml
+          cp ib_profile.xml evidence/
+          sha256sum ib_profile.xml > evidence/profile.sha256
+      - name: Build twice with empty target contents at the same path
+        run: |
+          set -euo pipefail
+          for pass in 1 2; do
+            cargo clean -p util
+            # Clean only this demonstration's build output; never clear the IB cache.
+            if [[ -d "$CARGO_TARGET_DIR" ]]; then
+              find "$CARGO_TARGET_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+            fi
+            caption="zed-util-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$pass"
+            echo "$caption" >> evidence/captions.txt
+            if [[ "$MODE" == native || "$MODE" == hosted ]]; then
+              /usr/bin/time -p cargo build -p util --locked 2>&1 | tee "evidence/build-$pass.log"
+            else
+              /usr/bin/time -p timeout 900 ib_console -c "$caption" --build-cache-report-all-miss cargo build -p util --locked 2>&1 | tee "evidence/build-$pass.log"
+            fi
+          done
+      - name: Test the real Zed crate outside interception
+        run: |
+          set -euo pipefail
+          cargo test -p util --lib --locked 2>&1 | tee evidence/tests.log
+      - name: Explain evidence boundaries
+        if: always()
+        run: |
+          echo "Mode: $MODE" >> "$GITHUB_STEP_SUMMARY"
+          echo "A green job proves build/test execution only. Cache reuse requires IB hit counters; distribution requires Build History remote tasks and remote core time. Hosted mode does not invoke ib_console. This small crate may not benefit from distribution." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zed-util-${{ inputs.mode }}-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
