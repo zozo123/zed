@@ -2,19 +2,19 @@ name: Incredibuild training E2E
 on:
   push:
     branches: [training/incredibuild-e2e]
-    paths: [.github/workflows/ib-training-e2e.yml]
+    paths: [training/trigger-native-control]
   workflow_dispatch:
     inputs:
       mode:
         description: Native control, hosted runner, or provisioned Linux IB initiator
         type: choice
-        options: [native, hosted, cache-only, distributed]
+        options: [native, hosted, hosted-console, cache-only, distributed]
         default: native
 permissions:
   contents: read
 jobs:
   util:
-    runs-on: ${{ ((inputs.mode == 'native' || github.event_name == 'push') && 'ubuntu-latest') || (inputs.mode == 'hosted' && 'incredibuild-runner') || fromJSON('["self-hosted","linux","ib-initiator"]') }}
+    runs-on: ${{ ((inputs.mode == 'native' || github.event_name == 'push') && 'ubuntu-latest') || ((inputs.mode == 'hosted' || inputs.mode == 'hosted-console') && 'incredibuild-runner') || fromJSON('["self-hosted","linux","ib-initiator"]') }}
     timeout-minutes: 30
     defaults:
       run:
@@ -27,6 +27,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Prepare evidence directory
         run: mkdir -p evidence
+      - name: Verify runner and Incredibuild services
+        run: |
+          set -euo pipefail
+          printf 'runner=%s os=%s mode=%s\n' "$RUNNER_NAME" "$RUNNER_OS" "$MODE" | tee evidence/runner.txt
+          nproc | tee evidence/cpus.txt
+          if [[ "$MODE" != native && "$MODE" != hosted ]]; then
+            command -v ib_console | tee evidence/ib-path.txt
+            ib_console -v 2>&1 | tee evidence/ib-version.txt
+            if [[ -x /opt/incredibuild/etc/init.d/incredibuild ]]; then
+              /opt/incredibuild/etc/init.d/incredibuild status 2>&1 | tee evidence/ib-services.txt
+            fi
+            timeout 60 ib_console -c "zed-preflight-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" /usr/bin/true 2>&1 | tee evidence/ib-preflight.txt
+          fi
       - name: Prepare toolchain and dependencies
         run: |
           set -euo pipefail
@@ -36,7 +49,7 @@ jobs:
           rustc -Vv > evidence/toolchain.txt
           git rev-parse HEAD > evidence/revision.txt
       - name: Select and validate Linux profile
-        if: inputs.mode == 'cache-only' || inputs.mode == 'distributed'
+        if: inputs.mode == 'cache-only' || inputs.mode == 'distributed' || inputs.mode == 'hosted-console'
         run: |
           set -euo pipefail
           command -v ib_console
@@ -83,6 +96,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zed-util-${{ inputs.mode }}-${{ github.run_id }}
+          name: zed-util-${{ inputs.mode || 'native' }}-${{ github.run_id }}
           path: evidence/
           if-no-files-found: warn
