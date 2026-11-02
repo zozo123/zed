@@ -1,5 +1,8 @@
 name: Incredibuild training E2E
 on:
+  push:
+    branches: [training/incredibuild-e2e]
+    paths: [.github/workflows/ib-training-e2e.yml]
   workflow_dispatch:
     inputs:
       mode:
@@ -11,17 +14,19 @@ permissions:
   contents: read
 jobs:
   util:
-    runs-on: ${{ (inputs.mode == 'native' && 'ubuntu-latest') || (inputs.mode == 'hosted' && 'incredibuild-runner') || fromJSON('["self-hosted","linux","ib-initiator"]') }}
+    runs-on: ${{ ((inputs.mode == 'native' || github.event_name == 'push') && 'ubuntu-latest') || (inputs.mode == 'hosted' && 'incredibuild-runner') || fromJSON('["self-hosted","linux","ib-initiator"]') }}
     timeout-minutes: 30
     defaults:
       run:
         shell: bash
     env:
-      MODE: ${{ inputs.mode }}
+      MODE: ${{ inputs.mode || 'native' }}
       CARGO_INCREMENTAL: '0'
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/ib-training
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare evidence directory
+        run: mkdir -p evidence
       - name: Prepare toolchain and dependencies
         run: |
           set -euo pipefail
